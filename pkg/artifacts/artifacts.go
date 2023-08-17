@@ -3,7 +3,7 @@ package artifacts
 import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	"github.com/khulnasoft-labs/vul-kubernetes/pkg/k8s"
+	"github.com/khulnasoft-lab/vul-kubernetes/pkg/k8s"
 )
 
 // Artifact holds information for kubernetes scannable resources

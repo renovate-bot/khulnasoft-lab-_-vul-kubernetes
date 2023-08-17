@@ -1,8 +1,8 @@
 # vul-kubernetes
 
-[![GoDoc](https://godoc.org/github.com/khulnasoft-labs/vul-kubernetes?status.svg)](https://godoc.org/github.com/khulnasoft-labs/vul-kubernetes)
-![Build](https://github.com/khulnasoft-labs/vul-kubernetes/workflows/Build/badge.svg)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/khulnasoft-labs/vul-kubernetes/blob/main/LICENSE)
+[![GoDoc](https://godoc.org/github.com/khulnasoft-lab/vul-kubernetes?status.svg)](https://godoc.org/github.com/khulnasoft-lab/vul-kubernetes)
+![Build](https://github.com/khulnasoft-lab/vul-kubernetes/workflows/Build/badge.svg)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/khulnasoft-lab/vul-kubernetes/blob/main/LICENSE)
 
 Vul Kubernetes Library.
 
@@ -17,4 +17,4 @@ This Lib purpose is to extend vul capabilities with kubernetes context:
 
 # Documentation
 
-Please check `vul` documentation, which provides detailed installation, configuration, and quick start guides, available at [Vul Kubernetes](https://khulnasoft-labs.github.io/vul/latest/docs/kubernetes/cli/scanning/)
+Please check `vul` documentation, which provides detailed installation, configuration, and quick start guides, available at [Vul Kubernetes](https://khulnasoft-lab.github.io/vul/latest/docs/kubernetes/cli/scanning/)

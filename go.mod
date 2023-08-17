@@ -1,4 +1,4 @@
-module github.com/khulnasoft-labs/vul-kubernetes
+module github.com/khulnasoft-lab/vul-kubernetes
 
 go 1.20
 

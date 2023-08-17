@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/khulnasoft-labs/vul-kubernetes/pkg/bom"
+	"github.com/khulnasoft-lab/vul-kubernetes/pkg/bom"
 	containerimage "github.com/google/go-containerregistry/pkg/name"
 	corev1 "k8s.io/api/core/v1"
 	k8sapierror "k8s.io/apimachinery/pkg/api/errors"

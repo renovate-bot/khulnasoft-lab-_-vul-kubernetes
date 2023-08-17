@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/khulnasoft-labs/vul-kubernetes/pkg/k8s"
+	"github.com/khulnasoft-lab/vul-kubernetes/pkg/k8s"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8sapierror "k8s.io/apimachinery/pkg/api/errors"

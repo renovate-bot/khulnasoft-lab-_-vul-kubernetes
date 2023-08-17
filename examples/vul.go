@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/khulnasoft-labs/vul-kubernetes/pkg/artifacts"
-	"github.com/khulnasoft-labs/vul-kubernetes/pkg/k8s"
-	"github.com/khulnasoft-labs/vul-kubernetes/pkg/vulk8s"
+	"github.com/khulnasoft-lab/vul-kubernetes/pkg/artifacts"
+	"github.com/khulnasoft-lab/vul-kubernetes/pkg/k8s"
+	"github.com/khulnasoft-lab/vul-kubernetes/pkg/vulk8s"
 
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"

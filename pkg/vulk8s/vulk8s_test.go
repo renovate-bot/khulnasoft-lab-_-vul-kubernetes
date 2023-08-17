@@ -3,7 +3,7 @@ package vulk8s
 import (
 	"testing"
 
-	"github.com/khulnasoft-labs/vul-kubernetes/pkg/artifacts"
+	"github.com/khulnasoft-lab/vul-kubernetes/pkg/artifacts"
 	"github.com/stretchr/testify/assert"
 )
 
