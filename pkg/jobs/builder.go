@@ -54,6 +54,12 @@ func WithTolerations(tolerations []corev1.Toleration) JobOption {
 	}
 }
 
+func WithPriorityClassName(priorityClassName string) JobOption {
+	return func(j *JobBuilder) {
+		j.priorityClassName = priorityClassName
+	}
+}
+
 func WithNodeCollectorImageRef(imageRef string) JobOption {
 	return func(j *JobBuilder) {
 		j.imageRef = imageRef
@@ -109,6 +115,7 @@ type JobBuilder struct {
 	securityContext    *corev1.SecurityContext
 	annotations        map[string]string
 	tolerations        []corev1.Toleration
+	priorityClassName  string
 	volumes            []corev1.Volume
 	volumeMounts       []corev1.VolumeMount
 	imagePullSecrets   []corev1.LocalObjectReference
@@ -130,8 +137,10 @@ func (b *JobBuilder) build() (*batchv1.Job, error) {
 		job.Spec.Template.Spec.Containers[0].Image = b.imageRef
 	}
 
-	if len(b.nodeSelector) > 0 {
-		job.Spec.Template.Spec.NodeName = b.nodeSelector
+	if b.nodeSelector != "" {
+		job.Spec.Template.Spec.NodeSelector = map[string]string{
+			corev1.LabelHostname: b.nodeSelector,
+		}
 	}
 	// append lables
 	for key, val := range b.labels {
@@ -152,6 +161,9 @@ func (b *JobBuilder) build() (*batchv1.Job, error) {
 	}
 	if len(b.tolerations) > 0 {
 		job.Spec.Template.Spec.Tolerations = b.tolerations
+	}
+	if b.priorityClassName != "" {
+		job.Spec.Template.Spec.PriorityClassName = b.priorityClassName
 	}
 	if b.podSecurityContext != nil {
 		job.Spec.Template.Spec.SecurityContext = b.podSecurityContext
