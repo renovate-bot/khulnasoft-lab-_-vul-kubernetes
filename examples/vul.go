@@ -30,7 +30,8 @@ func main() {
 
 	fmt.Println("Current namespace:", cluster.GetCurrentNamespace())
 
-	vulk8s := vulk8s.New(cluster, logger.Sugar())
+	vulk8sCopy := vulk8s.New(cluster, logger.Sugar(), vulk8s.WithExcludeOwned(true))
+	vulk8s := vulk8s.New(cluster, logger.Sugar(), vulk8s.WithExcludeOwned(true))
 
 	fmt.Println("Scanning cluster")
 
@@ -41,15 +42,22 @@ func main() {
 	}
 	printArtifacts(artifacts)
 
+	fmt.Println("Scanning kind 'pods' with exclude-owned=true")
+	artifacts, err = vulk8s.Resources("pod").AllNamespaces().ListArtifacts(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	printArtifacts(artifacts)
+
 	fmt.Println("Scanning namespace 'default'")
 	//vul k8s --namespace default
-	artifacts, err = vulk8s.Namespace("default").ListArtifacts(ctx)
+	artifacts, err = vulk8sCopy.Namespace("default").ListArtifacts(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
 	printArtifacts(artifacts)
 	fmt.Println("Scanning all namespaces ")
-	artifacts, err = vulk8s.AllNamespaces().ListArtifacts(ctx)
+	artifacts, err = vulk8sCopy.AllNamespaces().ListArtifacts(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -58,7 +66,7 @@ func main() {
 	fmt.Println("Scanning namespace 'default', resource 'deployment/orion'")
 
 	//vul k8s --namespace default deployment/orion
-	artifact, err := vulk8s.Namespace("default").GetArtifact(ctx, "deploy", "orion")
+	artifact, err := vulk8sCopy.Namespace("default").GetArtifact(ctx, "deploy", "orion")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -67,7 +75,7 @@ func main() {
 	fmt.Println("Scanning 'deployments'")
 
 	//vul k8s deployment
-	artifacts, err = vulk8s.Namespace("default").Resources("deployment").ListArtifacts(ctx)
+	artifacts, err = vulk8sCopy.Namespace("default").Resources("deployment").ListArtifacts(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -75,7 +83,7 @@ func main() {
 
 	fmt.Println("Scanning 'cm,pods'")
 	//vul k8s clusterroles,pods
-	artifacts, err = vulk8s.Namespace("default").Resources("cm,pods").ListArtifacts(ctx)
+	artifacts, err = vulk8sCopy.Namespace("default").Resources("cm,pods").ListArtifacts(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -105,7 +113,7 @@ func main() {
 	}
 
 	// collect node info
-	ar, err := vulk8s.ListArtifactAndNodeInfo(ctx, "vul-temp", map[string]string{"chen": "test"}, tolerations...)
+	ar, err := vulk8sCopy.ListArtifactAndNodeInfo(ctx, "vul-temp", map[string]string{"chen": "test"}, tolerations...)
 	if err != nil {
 		log.Fatal(err)
 	}

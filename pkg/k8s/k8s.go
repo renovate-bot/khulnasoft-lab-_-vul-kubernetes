@@ -5,12 +5,16 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/khulnasoft-lab/vul-kubernetes/pkg/bom"
 	containerimage "github.com/google/go-containerregistry/pkg/name"
+	"github.com/khulnasoft-lab/vul-kubernetes/pkg/bom"
+	"github.com/khulnasoft-lab/vul-kubernetes/pkg/k8s/docker"
+	"github.com/khulnasoft-lab/vul-kubernetes/utils"
+	ms "github.com/mitchellh/mapstructure"
 	corev1 "k8s.io/api/core/v1"
 	k8sapierror "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/dynamic"
@@ -18,6 +22,34 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/utils/strings/slices"
+)
+
+var (
+	UpstreamOrgName = map[string]string{
+		"k8s.io":      "controller-manager,kubelet,apiserver,kubectl,kubernetes,kube-scheduler,kube-proxy",
+		"sigs.k8s.io": "secrets-store-csi-driver",
+		"go.etcd.io":  "etcd/v3",
+	}
+
+	UpstreamRepoName = map[string]string{
+		"kube-controller-manager":  "controller-manager",
+		"kubelet":                  "kubelet",
+		"kube-apiserver":           "apiserver",
+		"kubectl":                  "kubectl",
+		"kubernetes":               "kubernetes",
+		"kube-scheduler":           "kube-scheduler",
+		"kube-proxy":               "kube-proxy",
+		"api server":               "apiserver",
+		"etcd":                     "etcd/v3",
+		"secrets-store-csi-driver": "secrets-store-csi-driver",
+	}
+	CoreComponentPropertyType = map[string]string{
+		"controller-manager": "controlPlane",
+		"apiserver":          "controlPlane",
+		"kube-scheduler":     "controlPlane",
+		"etcd/v3":            "controlPlane",
+		"kube-proxy":         "node",
+	}
 )
 
 const (
@@ -51,6 +83,8 @@ const (
 	ClusterRoleBindings    = "clusterrolebindings"
 	Nodes                  = "nodes"
 	k8sComponentNamespace  = "kube-system"
+
+	serviceAccountDefault = "default"
 )
 
 // Cluster interface represents the operations needed to scan a cluster
@@ -74,6 +108,8 @@ type Cluster interface {
 	CreateClusterBom(ctx context.Context) (*bom.Result, error)
 	// GetClusterVersion return cluster git version
 	GetClusterVersion() string
+	// AuthByResource return image pull secrets by resource pod spec
+	AuthByResource(resource unstructured.Unstructured) (map[string]docker.Auth, error)
 }
 
 type cluster struct {
@@ -283,7 +319,7 @@ func (c *cluster) CreateClusterBom(ctx context.Context) (*bom.Result, error) {
 	// collect addons info
 	var components []bom.Component
 	labels := map[string]string{
-		k8sComponentNamespace: "component",
+		"": "component",
 	}
 	if c.isOpenShift() {
 		labels = map[string]string{
@@ -293,7 +329,7 @@ func (c *cluster) CreateClusterBom(ctx context.Context) (*bom.Result, error) {
 			"openshift-etcd":                    "etcd",
 		}
 	}
-	components, err := c.collectComponents(ctx, labels, "ControlPlane")
+	components, err := c.collectComponents(ctx, labels)
 	if err != nil {
 		return nil, err
 	}
@@ -313,12 +349,8 @@ func (c *cluster) CreateClusterBom(ctx context.Context) (*bom.Result, error) {
 }
 
 func (c *cluster) GetContainer(imageRef containerimage.Reference, imageName containerimage.Reference) (bom.Container, error) {
-	repoName := imageRef.Context().RepositoryStr()
-	registryName := imageRef.Context().RegistryStr()
-	if strings.HasPrefix(repoName, "library/sha256") {
-		repoName = imageName.Context().RepositoryStr()
-		registryName = imageName.Context().RegistryStr()
-	}
+	repoName := imageName.Context().RepositoryStr()
+	registryName := imageName.Context().RegistryStr()
 
 	return bom.Container{
 		Repository: repoName,
@@ -381,7 +413,7 @@ func getPodsInfo(ctx context.Context, clientset *kubernetes.Clientset, labelSele
 	return pods, nil
 }
 
-func (c *cluster) collectComponents(ctx context.Context, labels map[string]string, propertyKey ...string) ([]bom.Component, error) {
+func (c *cluster) collectComponents(ctx context.Context, labels map[string]string) ([]bom.Component, error) {
 	components := make([]bom.Component, 0)
 	for namespace, labelSelector := range labels {
 		pods, err := getPodsInfo(ctx, c.clientset, labelSelector, namespace)
@@ -391,11 +423,15 @@ func (c *cluster) collectComponents(ctx context.Context, labels map[string]strin
 		for _, pod := range pods.Items {
 			containers := make([]bom.Container, 0)
 			for _, s := range pod.Status.ContainerStatuses {
-				imageRef, err := containerimage.ParseReference(s.ImageID)
+				imageName, err := utils.ParseReference(s.Image)
 				if err != nil {
 					return nil, err
 				}
-				imageName, err := containerimage.ParseReference(s.Image)
+				imageID := getImageID(s.ImageID, s.Image)
+				if len(imageID) == 0 {
+					continue
+				}
+				imageRef, err := utils.ParseReference(imageID)
 				if err != nil {
 					return nil, err
 				}
@@ -406,21 +442,40 @@ func (c *cluster) collectComponents(ctx context.Context, labels map[string]strin
 				containers = append(containers, c)
 			}
 			props := make(map[string]string)
-			if componentValue, ok := pod.GetLabels()[labelSelector]; ok {
-				props["Name"] = componentValue
+			componentValue, ok := pod.GetLabels()[labelSelector]
+			if ok {
+				props["Name"] = pod.Name
 			}
-			if len(propertyKey) > 0 {
-				props["Type"] = propertyKey[0]
+
+			repoName := upstreamRepoByName(componentValue)
+			if val, ok := CoreComponentPropertyType[repoName]; ok {
+				props["Type"] = val
 			}
+			orgName := upstreamOrgByName(repoName)
+			upstreamComponentName := repoName
+			if len(orgName) > 0 {
+				upstreamComponentName = fmt.Sprintf("%s/%s", orgName, repoName)
+			}
+			version := trimString(findComponentVersion(containers, componentValue), []string{"v", "V"})
 			components = append(components, bom.Component{
 				Namespace:  pod.Namespace,
-				Name:       pod.Name,
+				Name:       upstreamComponentName,
+				Version:    version,
 				Properties: props,
 				Containers: containers,
 			})
 		}
 	}
 	return components, nil
+}
+
+func findComponentVersion(containers []bom.Container, name string) string {
+	for _, c := range containers {
+		if strings.Contains(c.ID, name) {
+			return c.Version
+		}
+	}
+	return ""
 }
 
 func (c *cluster) isOpenShift() bool {
@@ -436,8 +491,10 @@ func (c *cluster) getClusterBomInfo(components []bom.Component, nodeInfo []bom.N
 	}
 	br := &bom.Result{
 		Components: components,
-		ID:         fmt.Sprintf("%s@%s", name, version),
+		ID:         "k8s.io/kubernetes",
 		Type:       "Cluster",
+		Version:    trimString(version, []string{"v", "V"}),
+		Properties: map[string]string{"Name": name, "Type": "cluster"},
 		NodesInfo:  nodeInfo,
 	}
 	return br, nil
@@ -454,4 +511,234 @@ func (c *cluster) ClusterNameVersion() (string, string, error) {
 		return "", "", err
 	}
 	return clusterName, version.GitVersion, nil
+}
+
+// ListImagePullSecretsByPodSpec return image pull secrets by pod spec
+func (r *cluster) ListImagePullSecretsByPodSpec(ctx context.Context, spec *corev1.PodSpec, ns string) (map[string]docker.Auth, error) {
+	if spec == nil {
+		return map[string]docker.Auth{}, nil
+	}
+	imagePullSecrets := spec.ImagePullSecrets
+
+	sa, err := r.getServiceAccountByPodSpec(ctx, spec, ns)
+	if err != nil && !k8sapierror.IsNotFound(err) {
+		return nil, err
+	}
+	imagePullSecrets = append(sa.ImagePullSecrets, imagePullSecrets...)
+
+	secrets, err := r.ListByLocalObjectReferences(ctx, imagePullSecrets, ns)
+	if err != nil {
+		return nil, err
+	}
+
+	return mapDockerRegistryServersToAuths(secrets, true)
+}
+
+func (r *cluster) getServiceAccountByPodSpec(ctx context.Context, spec *corev1.PodSpec, ns string) (*corev1.ServiceAccount, error) {
+	serviceAccountName := spec.ServiceAccountName
+	if serviceAccountName == "" {
+		serviceAccountName = serviceAccountDefault
+	}
+	sa, err := r.clientset.CoreV1().ServiceAccounts(ns).Get(ctx, serviceAccountName, metav1.GetOptions{})
+	if err != nil {
+		return sa, fmt.Errorf("getting service account by name: %s/%s: %w", ns, serviceAccountName, err)
+	}
+	return sa, nil
+}
+
+func (r *cluster) ListByLocalObjectReferences(ctx context.Context, refs []corev1.LocalObjectReference, ns string) ([]*corev1.Secret, error) {
+	secrets := make([]*corev1.Secret, 0)
+
+	for _, secretRef := range refs {
+		secret, err := r.clientset.CoreV1().Secrets(ns).Get(ctx, secretRef.Name, metav1.GetOptions{})
+		if err != nil {
+			if k8sapierror.IsNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("getting secret by name: %s/%s: %w", ns, secretRef.Name, err)
+		}
+		secrets = append(secrets, secret)
+	}
+	return secrets, nil
+}
+
+// MapDockerRegistryServersToAuths creates the mapping from a Docker registry server
+// to the Docker authentication credentials for the specified slice of image pull Secrets.
+func mapDockerRegistryServersToAuths(imagePullSecrets []*corev1.Secret, multiSecretSupport bool) (map[string]docker.Auth, error) {
+	auths := make(map[string]docker.Auth)
+	for _, secret := range imagePullSecrets {
+		var data []byte
+		var hasRequiredData, isLegacy bool
+
+		switch secret.Type {
+		case corev1.SecretTypeDockerConfigJson:
+			data, hasRequiredData = secret.Data[corev1.DockerConfigJsonKey]
+		case corev1.SecretTypeDockercfg:
+			data, hasRequiredData = secret.Data[corev1.DockerConfigKey]
+			isLegacy = true
+		default:
+			continue
+		}
+
+		// Skip a secrets of type "kubernetes.io/dockerconfigjson" or "kubernetes.io/dockercfg" which does not contain
+		// the required ".dockerconfigjson" or ".dockercfg" key.
+		if !hasRequiredData {
+			continue
+		}
+		dockerConfig := &docker.Config{}
+		err := dockerConfig.Read(data, isLegacy)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s or %s field of %q secret: %w", corev1.DockerConfigJsonKey, corev1.DockerConfigKey, secret.Namespace+"/"+secret.Name, err)
+		}
+		for authKey, auth := range dockerConfig.Auths {
+			server, err := docker.GetServerFromDockerAuthKey(authKey)
+			if err != nil {
+				return nil, err
+			}
+			if a, ok := auths[server]; multiSecretSupport && ok {
+				user := fmt.Sprintf("%s,%s", a.Username, auth.Username)
+				pass := fmt.Sprintf("%s,%s", a.Password, auth.Password)
+				auths[server] = docker.Auth{Username: user, Password: pass}
+			} else {
+				auths[server] = auth
+			}
+		}
+	}
+	return auths, nil
+}
+
+type ContainerImages map[string]string
+
+func MapContainerNamesToDockerAuths(imageRef string, auths map[string]docker.Auth) (*docker.Auth, error) {
+	wildcardServers := GetWildcardServers(auths)
+
+	var authsCred docker.Auth
+	server, err := docker.GetServerFromImageRef(imageRef)
+	if err != nil {
+		return &authsCred, err
+	}
+	if auth, ok := auths[server]; ok {
+		return &auth, nil
+	}
+	if len(wildcardServers) > 0 {
+		if wildcardDomain := matchSubDomain(wildcardServers, server); len(wildcardDomain) > 0 {
+			if auth, ok := auths[wildcardDomain]; ok {
+				return &auth, nil
+			}
+		}
+	}
+
+	return nil, nil
+}
+
+func GetWildcardServers(auths map[string]docker.Auth) []string {
+	wildcardServers := make([]string, 0)
+	for server := range auths {
+		if strings.HasPrefix(server, "*.") {
+			wildcardServers = append(wildcardServers, server)
+		}
+	}
+	return wildcardServers
+}
+
+func matchSubDomain(wildcardServers []string, subDomain string) string {
+	for _, domain := range wildcardServers {
+		domainWithoutWildcard := strings.Replace(domain, "*", "", 1)
+		if strings.HasSuffix(subDomain, domainWithoutWildcard) {
+			return domain
+		}
+	}
+	return ""
+}
+
+func getWorkloadPodSpec(un unstructured.Unstructured) (*corev1.PodSpec, error) {
+	switch un.GetKind() {
+	case KindPod:
+		objectMap, ok, err := unstructured.NestedMap(un.Object, []string{"spec"}...)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("unstructured resource do not match Pod spec")
+		}
+		return mapToPodSpec(objectMap)
+	case KindCronJob:
+		objectMap, ok, err := unstructured.NestedMap(un.Object, []string{"spec", "jobTemplate", "spec", "template", "spec"}...)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("unstructured resource do not match Pod spec")
+		}
+		return mapToPodSpec(objectMap)
+	case KindDeployment, KindReplicaSet, KindReplicationController, KindStatefulSet, KindDaemonSet, KindJob:
+		objectMap, ok, err := unstructured.NestedMap(un.Object, []string{"spec", "template", "spec"}...)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("unstructured resource do not match Pod spec")
+		}
+		return mapToPodSpec(objectMap)
+	default:
+		return nil, nil
+	}
+}
+
+func mapToPodSpec(objectMap map[string]interface{}) (*corev1.PodSpec, error) {
+	ps := &corev1.PodSpec{}
+	err := ms.Decode(objectMap, ps)
+	if err != nil && len(ps.Containers) == 0 {
+		return nil, err
+	}
+	return ps, nil
+}
+
+func (r *cluster) AuthByResource(resource unstructured.Unstructured) (map[string]docker.Auth, error) {
+	podSpec, err := getWorkloadPodSpec(resource)
+	if err != nil {
+		return nil, err
+	}
+	var serverAuths map[string]docker.Auth
+	serverAuths, err = r.ListImagePullSecretsByPodSpec(context.Background(), podSpec, resource.GetNamespace())
+	if err != nil {
+		return nil, err
+	}
+	return serverAuths, nil
+}
+
+func upstreamOrgByName(component string) string {
+	for key, components := range UpstreamOrgName {
+		for _, c := range strings.Split(components, ",") {
+			if strings.TrimSpace(c) == strings.ToLower(component) {
+				return key
+			}
+		}
+	}
+	return ""
+}
+
+func upstreamRepoByName(component string) string {
+	if val, ok := UpstreamRepoName[component]; ok {
+		return val
+	}
+	return component
+}
+
+func trimString(version string, trimValues []string) string {
+	for _, v := range trimValues {
+		version = strings.Trim(version, v)
+	}
+	return strings.TrimSpace(version)
+}
+
+func getImageID(imageID string, image string) string {
+	if len(imageID) > 0 {
+		return imageID
+	}
+	imageParts := strings.Split(image, "@")
+	if len(imageParts) > 1 && strings.HasPrefix(imageParts[1], "sha256") {
+		return imageParts[1]
+	}
+	return ""
 }

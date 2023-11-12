@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/khulnasoft-lab/vul-kubernetes/pkg/artifacts"
+	"github.com/khulnasoft-lab/vul-kubernetes/pkg/bom"
 	"github.com/khulnasoft-lab/vul-kubernetes/pkg/jobs"
 	"github.com/khulnasoft-lab/vul-kubernetes/pkg/k8s"
 	"go.uber.org/zap"
@@ -50,11 +51,24 @@ type client struct {
 	resources     []string
 	allNamespaces bool
 	logger        *zap.SugaredLogger
+	excludeOwned  bool
+}
+
+type K8sOption func(*client)
+
+func WithExcludeOwned(excludeOwned bool) K8sOption {
+	return func(c *client) {
+		c.excludeOwned = excludeOwned
+	}
 }
 
 // New creates a vulK8S client
-func New(cluster k8s.Cluster, logger *zap.SugaredLogger) VulK8S {
-	return &client{cluster: cluster, logger: logger}
+func New(cluster k8s.Cluster, logger *zap.SugaredLogger, opts ...K8sOption) VulK8S {
+	c := &client{cluster: cluster, logger: logger}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Namespace configure the namespace to execute the queries
@@ -80,7 +94,7 @@ func (c *client) Resources(resources string) VulK8S {
 	return c
 }
 
-func isNamspaced(namespace string, allNamespace bool) bool {
+func isNamespaced(namespace string, allNamespace bool) bool {
 	if len(namespace) != 0 || (len(namespace) == 0 && allNamespace) {
 		return true
 	}
@@ -91,7 +105,7 @@ func isNamspaced(namespace string, allNamespace bool) bool {
 func (c *client) ListArtifacts(ctx context.Context) ([]*artifacts.Artifact, error) {
 	artifactList := make([]*artifacts.Artifact, 0)
 
-	namespaced := isNamspaced(c.namespace, c.allNamespaces)
+	namespaced := isNamespaced(c.namespace, c.allNamespaces)
 	grvs, err := c.cluster.GetGVRs(namespaced, c.resources)
 	if err != nil {
 		return nil, err
@@ -124,7 +138,17 @@ func (c *client) ListArtifacts(ctx context.Context) ([]*artifacts.Artifact, erro
 			if c.ignoreResource(resource) {
 				continue
 			}
-			artifact, err := artifacts.FromResource(lastAppliedResource)
+
+			// if excludeOwned is enabled and the resource is owned by built-in workload, then we skip it
+			if c.excludeOwned && c.hasOwner(resource) {
+				continue
+			}
+
+			auths, err := c.cluster.AuthByResource(lastAppliedResource)
+			if err != nil {
+				return nil, fmt.Errorf("failed getting auth for gvr: %v - %w", gvr, err)
+			}
+			artifact, err := artifacts.FromResource(lastAppliedResource, auths)
 			if err != nil {
 				return nil, err
 			}
@@ -132,7 +156,11 @@ func (c *client) ListArtifacts(ctx context.Context) ([]*artifacts.Artifact, erro
 			artifactList = append(artifactList, artifact)
 		}
 	}
-
+	bomArtifacts, err := c.ListBomInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	artifactList = append(artifactList, bomArtifacts...)
 	return artifactList, nil
 }
 
@@ -190,25 +218,27 @@ func (c *client) ListArtifactAndNodeInfo(ctx context.Context, namespace string, 
 // ListBomInfo returns kubernetes Bom (node,core components and etc) information.
 func (c *client) ListBomInfo(ctx context.Context) ([]*artifacts.Artifact, error) {
 	artifactList := make([]*artifacts.Artifact, 0)
-	bom, err := c.cluster.CreateClusterBom(ctx)
+	b, err := c.cluster.CreateClusterBom(ctx)
 	if err != nil {
 		return []*artifacts.Artifact{}, err
 	}
 
-	for _, c := range bom.Components {
+	for _, c := range b.Components {
 		rawResource, err := rawResource(&c)
 		if err != nil {
 			return []*artifacts.Artifact{}, err
 		}
-		artifactList = append(artifactList, &artifacts.Artifact{Kind: "PodInfo", Namespace: c.Namespace, Name: c.Name, RawResource: rawResource})
+		artifactList = append(artifactList, &artifacts.Artifact{Kind: "ControlPlaneComponents", Namespace: c.Namespace, Name: c.Name, RawResource: rawResource})
 	}
-	for _, ni := range bom.NodesInfo {
+	for _, ni := range b.NodesInfo {
 		rawResource, err := rawResource(&ni)
 		if err != nil {
 			return []*artifacts.Artifact{}, err
 		}
-		artifactList = append(artifactList, &artifacts.Artifact{Kind: "NodeInfo", Name: ni.NodeName, RawResource: rawResource})
+		artifactList = append(artifactList, &artifacts.Artifact{Kind: "NodeComponents", Name: ni.NodeName, RawResource: rawResource})
 	}
+	cr, err := rawResource(&bom.Result{ID: b.ID, Type: "ClusterInfo", Version: b.Version, Properties: b.Properties})
+	artifactList = append(artifactList, &artifacts.Artifact{Kind: "Cluster", Name: b.ID, RawResource: cr})
 	return artifactList, err
 
 }
@@ -238,8 +268,11 @@ func (c *client) GetArtifact(ctx context.Context, kind, name string) (*artifacts
 	if err != nil {
 		return nil, fmt.Errorf("failed getting resource for gvr: %v - %w", gvr, err)
 	}
-
-	artifact, err := artifacts.FromResource(*resource)
+	auths, err := c.cluster.AuthByResource(*resource)
+	if err != nil {
+		return nil, fmt.Errorf("failed getting auth for gvr: %v - %w", gvr, err)
+	}
+	artifact, err := artifacts.FromResource(*resource, auths)
 	if err != nil {
 		return nil, err
 	}
@@ -272,6 +305,10 @@ func (c *client) ignoreResource(resource unstructured.Unstructured) bool {
 		return false
 	}
 
+	return c.hasOwner(resource)
+}
+
+func (c *client) hasOwner(resource unstructured.Unstructured) bool {
 	for _, owner := range resource.GetOwnerReferences() {
 		if k8s.IsBuiltInWorkload(&owner) {
 			return true
