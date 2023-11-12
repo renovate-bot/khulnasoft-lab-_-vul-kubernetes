@@ -1,6 +1,6 @@
 ---
 # This workflow is triggered whenever we release a new version of
-# trivy-kubernetes by creating an annotated Git tag and
+# vul-kubernetes by creating an annotated Git tag and
 # pushing it to the upstream Git repository.
 #
 #    git tag -a v0.0.1 -m 'Release v0.0.1'
@@ -22,7 +22,7 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: actions/cache@v3
@@ -40,11 +40,11 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Release
-        uses: goreleaser/goreleaser-action@v4
+        uses: goreleaser/goreleaser-action@v5
         with:
           version: v1.7.0
           args: release --rm-dist
